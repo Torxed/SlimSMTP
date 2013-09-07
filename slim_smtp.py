@@ -7,6 +7,9 @@ from socket import *
 from time import sleep, strftime, localtime, time
 from os import _exit, remove, getpid
 from os.path import isfile, isdir
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import dns.resolver
 
 __date__ = '2013-07-10 09:46 CET'
 __version__ = '0.0.7p2'
@@ -21,6 +24,77 @@ core = {'_socket' : {'listen' : '', 'port' : 25, 'SSL' : True},
 		'storages' : {'test@example.se' : '/storage/mail/test',
 					'default' : '/storage/mail/unsorted'}}
 
+known_delivery_spots = {'gmail.com' : 'smtp.gmail.com'}
+
+def external_mail(_from, to, message):
+	user, domain = getDomainInfo(to)
+	if not domain in known_delivery_spots:
+		s = socket()
+		s.settimeout(2.5)
+		try:
+			s.connect(('smtp.' + domain, 587))
+			s.close()
+			known_delivery_spots[domain] = 'smtp.' + domain
+		except:
+			print('Could not guess SMTP spot, trying MX records')
+			for x in dns.resolver.query(domain, 'MX'):
+				mx = x.to_text().split(' ',1)[1]
+				s = socket()
+				s.settimeout(2.5)
+				try:
+					s.connect((mx, 587))
+					print('Found working MX record:',mx)
+					s.close()
+					known_delivery_spots[domain] = mx
+					break
+				except:
+					print('No working MX records founds, trying plain connect')
+					s = socket()
+					s.settimeout(2.5)
+					try:
+						s.connect((domain, 587))
+						s.close()
+						known_delivery_spots[domain] = domain
+					except:
+						pass
+	if not domain in known_delivery_spots:
+		return False
+
+	server = smtplib.SMTP(known_delivery_spots[domain], 587)
+	server.ehlo()
+	server.starttls()
+	server.sendmail(_from, to, message)
+	server.quit()
+	return True
+	#if core['relay'][2]:
+	#	try:
+	#		server.starttls()
+	#	except:
+	#		print ' ! The relay-server doesn\'t support TLS/SSL!'
+	#		server.quit()
+	#		return False
+	#if len(core['relay']) >= 5:
+	#	try:
+	#		server.login(core['relay'][3], core['relay'][4])
+	#	except:
+	#		print ' ! Invalid credentials towards relay server'
+	#		server.quit()
+	#		return False
+	#try:
+	#	server.sendmail(_from, to, message)
+	#except smtplib.SMTPRecipientsRefused:
+	#	print ' ! Could not relay the mail, Recipient Refused!'
+	#	server.quit()
+	#	return False
+	#except Exception, e:
+	#	if type(e) == tuple and len(e) >= 3:
+	#		print ' !- ' + str(e[0]) + ' ' + str(e[1])
+	#	server.quit()
+	#	return False
+
+	#server.quit()
+	return True
+
 class SanityCheck(Exception):
 	pass
 
@@ -30,7 +104,7 @@ def pid_exists(pid):
 		return False
 	try:
 		os.kill(pid, 0)
-	except OSError, e:
+	except (OSError, e):
 		return e.errno == errno.EPERM
 	else:
 		return True
@@ -55,12 +129,12 @@ def sanity_startup_check():
 		if pid_exists(thepid):
 			exit(1)
 		else:
-			print 'Removed the PID file, dead session!'
+			print('Removed the PID file, dead session!')
 			remove(pidfile)
 
 	for storages in core['storages']:
 		if not isdir(core['storages'][storages]):
-			print ' ! Warning - Missing storage: ' + core['storages'][storages]
+			print(' ! Warning - Missing storage: ' + core['storages'][storages])
 			## TODO: Create these missing folders,
 			##       but do it in a clean non-introusive way
 			##       (for instance, having default storage to /var would cause issues)
@@ -87,37 +161,6 @@ def local_mail(_from, _to, message):
 
 	return True
 
-def external_mail(_from, to, message):
-	server = smtplib.SMTP(core['relay'][0], core['relay'][1])
-	server.ehlo()
-	if core['relay'][2]:
-		try:
-			server.starttls()
-		except:
-			print ' ! The relay-server doesn\'t support TLS/SSL!'
-			server.quit()
-			return False
-	if len(core['relay']) >= 5:
-		try:
-			server.login(core['relay'][3], core['relay'][4])
-		except:
-			print ' ! Invalid credentials towards relay server'
-			server.quit()
-			return False
-	try:
-		server.sendmail(_from, to, message)
-	except smtplib.SMTPRecipientsRefused:
-		print ' ! Could not relay the mail, Recipient Refused!'
-		server.quit()
-		return False
-	except Exception, e:
-		if type(e) == tuple and len(e) >= 3:
-			print ' !- ' + str(e[0]) + ' ' + str(e[1])
-		server.quit()
-		return False
-
-	server.quit()
-	return True
 
 class parser():
 	def __init__(self):
@@ -144,7 +187,7 @@ class parser():
 		## mainly because reset is called inside the data loop.
 
 	def deliver(self):
-		print ' | Sending mail: ' + self.From + '(' + self.authed_session + ') -> ' + self.to
+		print(' | Sending mail: ' + self.From + '(' + self.authed_session + ') -> ' + self.to)
 		## == Just to make sure, as long as we're authenticated and the authenticated "user"
 		## == doesn't begin with an "#" (reserved for system-design-users), we'll send externally.
 		if self.external and self.authed_session and self.authed_session[0] != '#':
@@ -170,7 +213,7 @@ class parser():
 				self.authed_session = username
 				response += '235 2.7.0 Authentication successful\r\n'
 			else:
-				print ' ! No such user:',[username]
+				print(' ! No such user:',[username])
 				# 535 5.7.1 authentication failed\r\n
 				response += '535 5.7.8 Error: authentication failed\r\n'
 			del password
@@ -324,7 +367,7 @@ class _clienthandle(Thread):
 				if self.ssl: data = self.socket.read()
 				else: data = self.socket.recv(8192)
 			except:
-				print ' ! ' + str(self.addr[0]) + ' disconnected unexpectedly'
+				print(' ! ' + str(self.addr[0]) + ' disconnected unexpectedly')
 				break
 
 			## To enforce SSL:
@@ -345,7 +388,7 @@ class _clienthandle(Thread):
 					self.socket = ssl.wrap_socket(self.socket, keyfile=core['SSL']['key'], certfile=core['SSL']['cert'], server_side=True, do_handshake_on_connect=True, suppress_ragged_eofs=False, cert_reqs=ssl.CERT_NONE, ca_certs=None, ssl_version=core['SSL']['VERSION'])
 					self.ssl = True
 					self.parser.ssl = self.ssl
-					print ' | Converted into a SSL socket!'
+					print(' | Converted into a SSL socket!')
 					continue
 
 			recieved_data += data
@@ -382,7 +425,7 @@ class _socket(Thread, socket):
 				sleep(5)
 		self.listen(4)
 
-		print ' | Bound to ' + ':'.join((core['_socket']['listen'], str(core['_socket']['port'])))
+		print(' | Bound to ' + ':'.join((core['_socket']['listen'], str(core['_socket']['port']))))
 
 		Thread.__init__(self)
 		self.start()
@@ -404,14 +447,35 @@ class _socket(Thread, socket):
 			sleep(0.025)
 		self.close()
 
-sanity_startup_check()
+if __name__ == '__main__':
+	#sanity_startup_check()
 
-pid = getpid()
-f = open(pidfile, 'wb')
-f.write(str(pid))
-f.close()
+	#pid = getpid()
+	#f = open(pidfile, 'wb')
+	#f.write(str(pid))
+	#f.close()
 
-s = _socket()
-signal.signal(signal.SIGINT, signal_handler)
-while 1:
-	sleep(1)
+	#s = _socket()
+	#signal.signal(signal.SIGINT, signal_handler)
+	#while 1:
+	#	sleep(1)
+	msg = MIMEMultipart('alternative')
+	text = "Hi!\nHow are you?\nThis is a test."
+	html = """\
+<html>
+  <head></head>
+  <body>
+    <p>Hi!<br>
+       How are you?<br>
+       This is a test.
+    </p>
+  </body>
+</html>
+"""
+	msg.attach(MIMEText(text, 'plain'))
+	msg.attach(MIMEText(html, 'html'))
+	#MIMEText("This is a test")
+	msg['Subject'] = 'This is a test mail'
+	msg['From'] = 'anton@bigrig.hvornum.se'
+	msg['To'] = 'anton.doxid@gmail.com'
+	external_mail('anton@bigrig.hvornum.se', 'anton.doxid@gmail.com', msg.as_string())
